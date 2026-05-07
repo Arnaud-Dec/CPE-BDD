@@ -1,6 +1,6 @@
 # TP Optimisation - Index et Tables Partitionnées
 
-## INDEX
+## Arnaud DECOURT Théo DEMARIA
 
 ---
 
@@ -437,56 +437,3 @@ DROP TABLE ville CASCADE;
 - Sans restriction (toutes les lignes retournées) → PostgreSQL choisit ici un Hash Join, et les index ne donnent pas d'accès plus sélectif (Q9).
 - Avec restriction → indexer le champ du WHERE + les FK pour permettre un Nested Loop (Q10).
 
----
-
-## RÉSULTATS ATTENDUS - GUIDE DE VERIFICATION
-
-| Q | Étape | Type de scan attendu | Coût attendu |
-|---|---|---|---|
-| 1 | Sans index | Seq Scan | 183.32 |
-| 1 | Avec idx_film_id | Index Scan | 8.30 |
-| 2 | Sans index | Seq Scan | 207.59 |
-| 2 | Avec idx_film_id | Index Scan | 8.30 |
-| 2 | Avec idx_film_id + idx_film_pays | Index Scan (idx_film_id, pays ignoré) | 8.30 |
-| 3 | Sans index | Seq Scan | 207.59 |
-| 3 | Avec idx_film_id seul | Seq Scan (index ignoré) | 207.59 |
-| 3 | Avec idx_film_id + idx_film_pays | Bitmap Heap Scan + BitmapOr | 32.13 |
-| 4 | Sans index | Seq Scan | 183.32 |
-| 4 | Avec idx_film_id | Seq Scan (index ignoré, 79% lignes) | 183.32 |
-| 5 | Avec idx_film_id | Index Scan | 68.14 |
-| 6 | (pays,annee) - WHERE pays | Bitmap Heap Scan | ~25 |
-| 6 | (pays,annee) - WHERE annee | Seq Scan (index ignoré) | 183.32 |
-| 6 | (pays,annee) - OR | Seq Scan | 207.59 |
-| 6 | (annee,pays) - WHERE pays | Bitmap Heap Scan (skip scan PG18) | 25.37 |
-| 6 | (annee,pays) - WHERE annee | Bitmap Heap Scan | ~70 |
-| 6 | (annee,pays) - OR | Bitmap Heap Scan + BitmapOr | ~96 |
-| 6 | 2 mono - OR | Bitmap Heap Scan + BitmapOr | 74.83 |
-| 7 | idx multicolonne - WHERE id_film | Index Only Scan | 4.30 |
-| 7 | idx multicolonne - WHERE id_real | Seq Scan (index ignoré) | 174.06 |
-| 7 | + idx mono id_real - WHERE id_real | Index Scan | 10.87 |
-| 8 | Index sur pays | Seq Scan (fonction ignorée) | 207.59 |
-| 8 | Index sur substr(pays,1,2) | Bitmap Heap Scan | 67.10 |
-| 9 | Sans index | Hash Join | 903.25 |
-| 9 | Avec idx_film_id | Hash Join (identique) | 678.03 |
-| 9 | Avec idx_film_id + idx_titres_id_film | Hash Join (identique) | 678.03 |
-| 10 | Sans index | Hash Join | 604.89 |
-| 10 | + idx_film_id | Hash Join (quasi identique) | 581.40 |
-| 10 | + idx_film_pays | Hash Join (Bitmap sur film) | 458.62 |
-| 10 | + idx_titres_id_film | Nested Loop | 304.53 |
-| 11 | annee=2003 (index partiel >= 2000) | Index Scan | 29.51 |
-| 11 | annee=1995 (hors plage index) | Seq Scan | 183.32 |
-| 12 | SELECT * FROM films1995 | Seq Scan (vue transparente) | 183.32 |
-| 13 | WHERE id >= ALL(...) | Seq Scan + SubPlan x9706 | 1 125 375 |
-| 13 | NOT EXISTS | Nested Loop Anti Join | 942 552 |
-| 13 | SELECT MAX(id) | Aggregate + Seq Scan | 183.33 |
-| 14 | NOT IN | Seq Scan + hashed SubPlan | 286.76 |
-| 14 | NOT EXISTS | Hash Right Anti Join | 461.78 |
-| 14 | LEFT JOIN IS NULL | Hash Right Anti Join (identique) | 461.78 |
-| 15 | BETWEEN | Seq Scan | 207.59 |
-| 15 | OR | Seq Scan | 207.59 |
-| 15 | IN | Seq Scan (ANY) | 183.32 |
-| 15 | UNION | 2x Seq Scan + Sort + Unique | 366.69 |
-| 16 | NOT EXISTS imbriqué | Nested Loop Anti Join | ~5 792 436 113 |
-| 16 | COUNT GROUP BY HAVING | GroupAggregate + Hash Join | 1 504.72 |
-| TP | WHERE nom='Lyon' (5 partitions) | Append + 5x Seq Scan | 68.15 |
-| TP | WHERE nbhabitants=120000 (pruning) | Append + 4x Seq Scan | 54.52 |
