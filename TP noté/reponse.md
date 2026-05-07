@@ -76,3 +76,63 @@ Coût : **183.32**. Seq Scan, 7 706 lignes retournées sur 9 706 (~79% de la tab
 Coût : **183.32** — **aucun changement**. PostgreSQL ignore l'index. Retourner 79% de la table via un index serait plus coûteux qu'un Seq Scan direct sur les 62 pages. L'index n'est utile que si peu de lignes sont retournées (< ~20-30%).
 
 ---
+
+### Question 5 — `SELECT * FROM film WHERE id>8000;`
+
+#### Avec `CREATE UNIQUE INDEX idx_film_id ON film(id)`
+![Q5 avec index](screenshots/q5_avec_index.png)
+
+Coût : **68.14**. Cette fois PostgreSQL **utilise l'Index Scan**. Seulement **1 706 lignes** sur 9 706 sont retournées (~17% de la table), ce qui est en dessous du seuil de rentabilité de l'index (~20-30%).
+
+**Comparaison avec Q4 :** `id>2000` retournait 79% des lignes → Seq Scan. `id>8000` retourne seulement 17% → Index Scan. C'est le **volume de données retourné** qui détermine si l'index est utilisé : plus la sélection est restrictive, plus l'index est rentable.
+
+---
+
+### Question 6 — Index multicolonnes
+
+#### Bloc 1 — `CREATE INDEX idx_film_pays_annee ON film(pays, annee)`
+
+![Q6 Bloc1 pays='CH/FR'](screenshots/q6_pays_annee_sur_pays.png)
+
+`WHERE pays='CH/FR'` → **Bitmap Heap Scan** via `idx_film_pays_annee`. La 1ère colonne de l'index correspond au critère : l'index est utilisé.
+
+`WHERE annee=1991` → **Seq Scan** (coût 183.32). La 2ème colonne seule ne suffit pas à exploiter l'index multicolonne : PostgreSQL l'ignore.
+
+`WHERE pays='CH/FR' OR annee=1991` → **Seq Scan**. Avec OR et un seul index, si une condition ne peut pas utiliser l'index (annee seul), PostgreSQL revient au Seq Scan complet.
+
+#### Bloc 2 — `CREATE INDEX idx_film_annee_pays ON film(annee, pays)`
+
+`WHERE pays='CH/FR'` → **Index Scan** via `idx_film_annee_pays`. Grâce au **Skip Scan** de PostgreSQL 18, même la 2ème colonne peut utiliser l'index (contrairement au Bloc 1).
+
+![Q6 Bloc2 annee=1991](screenshots/q6_annee_pays_sur_annee.png)
+
+`WHERE annee=1991` → **Bitmap Heap Scan** via `idx_film_annee_pays`. La 1ère colonne correspond au critère : utilisation optimale.
+
+![Q6 Bloc2 OR](screenshots/q6_annee_pays_or.png)
+
+`WHERE pays='CH/FR' OR annee=1991` → **Bitmap OR** via le même index pour les 2 conditions grâce au Skip Scan.
+
+#### Bloc 3 — 2 index mono-colonne : `idx_film_pays` + `idx_film_annee`
+
+`WHERE pays='CH/FR'` → **Bitmap Heap Scan** via `idx_film_pays`.
+`WHERE annee=1991` → **Index Scan** via `idx_film_annee`.
+
+![Q6 mono OR](screenshots/q6_mono_or.png)
+
+`WHERE pays='CH/FR' OR annee=1991` → **Bitmap OR** avec les 2 index distincts. Résultat identique au Bloc 2 mais avec 2 index séparés.
+
+#### Tailles des index
+![Q6 tailles](screenshots/q6_tailles.png)
+
+| Index | Taille |
+|---|---|
+| idx_film_pays (mono) | 112 kB |
+| idx_film_annee (mono) | 88 kB |
+| **Total 2 mono** | **200 kB** |
+
+Un index multicolonne est plus compact que 2 index mono-colonne séparés car il ne stocke qu'une seule entrée par ligne pour les 2 champs combinés.
+
+#### Synthèse
+L'index multicolonne est pertinent uniquement si la **1ère colonne est systématiquement présente dans les requêtes** (règle du préfixe). Sous PostgreSQL 18, le Skip Scan atténue cette contrainte. Les 2 index mono-colonne sont plus flexibles (chaque condition peut utiliser son index indépendamment) mais occupent plus d'espace et pénalisent davantage les écritures.
+
+---
