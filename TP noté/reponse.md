@@ -223,6 +223,65 @@ CREATE INDEX idx_film_annee ON film(annee) WHERE annee >= 2000;
 
 ---
 
+### Question 12 — Vue `films1995`
+
+```sql
+CREATE OR REPLACE VIEW films1995 AS SELECT id, annee FROM film WHERE annee = 1995;
+SELECT * FROM films1995;
+```
+
+**Plan :** Seq Scan sur `film`, coût **183.32**, filtre `annee = 1995`.
+
+**Constat :** La vue est **transparente** — PostgreSQL exécute directement le SELECT interne à la vue sur la table réelle. Aucune donnée n'est stockée. Le coût est identique à `SELECT * FROM film WHERE annee = 1995` sans vue.
+
+**Préconisation :** Sans index sur `annee`, la vue génère un Seq Scan à chaque appel. Pour optimiser, il faudrait créer un index sur `film(annee)` (ou un index partiel comme en Q11). Si la vue est très fréquemment appelée et que les données changent peu, une **vue matérialisée** (`MATERIALIZED VIEW`) serait encore plus performante car elle stocke physiquement les résultats.
+
+---
+
+### Question 13 — 3 façons d'obtenir le MAX(id) — sans index
+
+**Requête 1 — `WHERE id >= ALL(...)`**
+Coût : **1 125 375** — Exécution : ~2 735 ms. La sous-requête est exécutée **9 706 fois** (1 fois par ligne de film). Plan catastrophique : Nested Loop avec Seq Scan répété sur toute la table.
+
+**Requête 2 — `NOT EXISTS`**
+Coût : **942 552** — Exécution : ~2 531 ms. Nested Loop Anti Join : pour chaque ligne de f1, PostgreSQL cherche une ligne f2 avec id supérieur. Légèrement moins catastrophique que ALL mais reste une double boucle complète (47 millions de comparaisons).
+
+**Requête 3 — `SELECT MAX(id)`**
+Coût : **183.33** — Exécution : ~0.68 ms. Un seul Seq Scan + agrégat. PostgreSQL lit la table une seule fois et garde le maximum en mémoire. **Incomparablement plus rapide.**
+
+**Classement par efficacité :** MAX > NOT EXISTS > ALL
+
+**Conclusion :** `MAX()` est la seule écriture adaptée pour ce type de requête. Les formes ALL et NOT EXISTS génèrent des plans en O(n²) catastrophiques.
+
+---
+
+### Question 14 — Réalisateurs n'ayant jamais réalisé de film
+
+#### a. Plans d'exécution (sans index)
+
+**NOT IN** — coût **286.76**, ~2.9 ms
+Seq Scan sur realisateur avec sous-plan haché (hashed SubPlan) : PostgreSQL charge tous les id_real de Realise en table de hachage, puis filtre realisateur. Moins coûteux que la Q13 mais reste sous-optimal.
+
+**NOT EXISTS** — coût **461.78**, ~1.75 ms
+PostgreSQL transforme le NOT EXISTS en **Hash Right Anti Join** : il charge realisateur en table de hachage, parcourt realise et retourne les réalisateurs sans correspondance. Plan identique au LEFT JOIN.
+
+**LEFT JOIN ... IS NULL** — coût **461.78**, ~1.71 ms
+Plan strictement identique au NOT EXISTS : PostgreSQL génère le même **Hash Right Anti Join**. L'optimiseur reconnaît que les deux écritures sont équivalentes.
+
+**Classement :** NOT IN (286.76) < NOT EXISTS ≈ LEFT JOIN (461.78) en coût estimé, mais NOT EXISTS et LEFT JOIN sont plus rapides en pratique (~1.7 ms vs ~2.9 ms).
+
+#### b. Comparaison Oracle
+Sous Oracle 11g, les 3 requêtes ont le même coût et le même plan (l'optimiseur les unifie). Sous Oracle 10g, EXISTS et OUTER JOIN sont bien plus performants que NOT IN. Cela montre qu'**un changement de version ou de SGBD peut totalement modifier les plans d'exécution** : une requête optimale sur un SGBD peut devenir catastrophique sur un autre. Il ne faut pas supposer que le comportement sera identique lors d'une migration.
+
+#### c. Optimisation par index
+Oui, 2 index sont utiles :
+- `CREATE INDEX idx_realise_idreal ON realise(id_real);` — FK côté Realise (champ de jointure)
+- `CREATE UNIQUE INDEX idx_realisateur_id ON realisateur(id);` — PK de Realisateur
+
+Ces index permettraient de passer d'un Hash Join à un Nested Loop si peu de réalisateurs sont concernés.
+
+---
+
 ## RÉSULTATS ATTENDUS — GUIDE DE REVIEW
 
 | Q | Étape | Type de scan attendu | Coût attendu |
@@ -259,3 +318,10 @@ CREATE INDEX idx_film_annee ON film(annee) WHERE annee >= 2000;
 | 10 | + idx_titres_id_film | Nested Loop | 304.53 |
 | 11 | annee=2003 (index partiel >= 2000) | Index Scan | 29.51 |
 | 11 | annee=1995 (hors plage index) | Seq Scan | 183.32 |
+| 12 | SELECT * FROM films1995 | Seq Scan (vue transparente) | 183.32 |
+| 13 | WHERE id >= ALL(...) | Seq Scan + SubPlan x9706 | 1 125 375 |
+| 13 | NOT EXISTS | Nested Loop Anti Join | 942 552 |
+| 13 | SELECT MAX(id) | Aggregate + Seq Scan | 183.33 |
+| 14 | NOT IN | Seq Scan + hashed SubPlan | 286.76 |
+| 14 | NOT EXISTS | Hash Right Anti Join | 461.78 |
+| 14 | LEFT JOIN IS NULL | Hash Right Anti Join (identique) | 461.78 |
