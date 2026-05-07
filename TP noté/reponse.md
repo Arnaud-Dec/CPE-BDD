@@ -96,13 +96,19 @@ Coût : **68.14**. Cette fois PostgreSQL **utilise l'Index Scan**. Seulement **1
 
 `WHERE pays='CH/FR'` → **Bitmap Heap Scan** via `idx_film_pays_annee`. La 1ère colonne de l'index correspond au critère : l'index est utilisé.
 
+![Q6 Bloc1 annee=1991](screenshots/q6_pays_annee_sur_annee.png)
+
 `WHERE annee=1991` → **Seq Scan** (coût 183.32). La 2ème colonne seule ne suffit pas à exploiter l'index multicolonne : PostgreSQL l'ignore.
+
+![Q6 Bloc1 OR](screenshots/q6_pays_annee_or.png)
 
 `WHERE pays='CH/FR' OR annee=1991` → **Seq Scan**. Avec OR et un seul index, si une condition ne peut pas utiliser l'index (annee seul), PostgreSQL revient au Seq Scan complet.
 
 #### Bloc 2 — `CREATE INDEX idx_film_annee_pays ON film(annee, pays)`
 
 `WHERE pays='CH/FR'` → **Index Scan** via `idx_film_annee_pays`. Grâce au **Skip Scan** de PostgreSQL 18, même la 2ème colonne peut utiliser l'index (contrairement au Bloc 1).
+
+![Q6 Bloc2 pays='CH/FR'](screenshots/q6_annee_pays_sur_pays.png)
 
 ![Q6 Bloc2 annee=1991](screenshots/q6_annee_pays_sur_annee.png)
 
@@ -140,13 +146,19 @@ L'index multicolonne est pertinent uniquement si la **1ère colonne est systéma
 
 #### Avec index unique multicolonne sur (id_film, id_real)
 
+![Q7 index multicolonne - id_film](screenshots/q7_multicolonne_idfil.png)
+
 `WHERE id_film=1` → **Index Only Scan** via `idx_realise` (coût 4.30). La 1ère colonne correspond : index utilisé et même pas besoin d'accéder à la table (toutes les colonnes sont dans l'index).
+
+![Q7 index multicolonne - id_real](screenshots/q7_multicolonne_idreal.png)
 
 `WHERE id_real=2` → **Seq Scan** (coût 174.06). La 2ème colonne seule ne suffit pas : index ignoré, 10 243 lignes parcourues inutilement.
 
 #### Avec index unique multicolonne + 2 index mono-colonne (id_film et id_real)
 
 `WHERE id_film=1` → **Index Only Scan** via `idx_realise` (coût 4.30). Identique.
+
+![Q7 avec index mono id_real](screenshots/q7_avec_mono_idrea.png)
 
 `WHERE id_real=2` → **Index Scan** via `idx_realise_idreal` (coût 10.87). Cette fois l'index mono-colonne sur `id_real` est utilisé.
 
@@ -159,13 +171,6 @@ Règle générale : **toujours indexer les clés étrangères** (FK) car elles s
 
 ---
 
----
-| 6 | 2 mono — OR | Bitmap Heap Scan + BitmapOr | ~75 |
-| 7 | idx multicolonne — WHERE id_film | Index Only Scan | 4.30 |
-| 7 | idx multicolonne — WHERE id_real | Seq Scan (index ignoré) | 174.06 |
-| 7 | + idx mono id_real — WHERE id_real | Index Scan | 10.87 |
-
-
 ### Question 8 — `SELECT * FROM film WHERE SUBSTR(pays,1,2) = 'CH';`
 
 **Avec `idx_film_pays` (index sur pays) :** Seq Scan, coût **207.59**. L'index sur `pays` est ignoré car la requête n'utilise pas `pays` directement mais une **fonction** appliquée dessus (`SUBSTR`). PostgreSQL ne peut pas utiliser un index B-tree sur `pays` pour rechercher sur `SUBSTR(pays,1,2)`.
@@ -173,8 +178,6 @@ Règle générale : **toujours indexer les clés étrangères** (FK) car elles s
 **Avec `idx_film_substr_pays` (index sur expression) :** Bitmap Heap Scan, coût **67.10**. En indexant directement l'expression `substr(pays,1,2)`, PostgreSQL peut utiliser l'index car la valeur calculée est stockée dans l'index. L'index sur fonction résout exactement ce problème.
 
 **Conclusion :** Un index classique sur une colonne est inefficace si une fonction est appliquée dans le WHERE. Il faut créer un **index sur expression** qui pré-calcule et stocke le résultat de la fonction.
-
----
 
 ---
 
@@ -192,11 +195,15 @@ Règle générale : **toujours indexer les clés étrangères** (FK) car elles s
 
 ### Question 10 — JOIN Film / Titres avec `WHERE f.pays='FR/BE'`
 
+![Q10 sans index](screenshots/q10_sans_index.png)
+
 **Sans index :** Hash Join, coût **604.89**. Titres est parcourue entièrement (Seq Scan, 20 247 lignes), film aussi (Seq Scan avec filtre pays, 35 résultats). La restriction réduit le volume mais sans index PostgreSQL doit tout lire.
 
 **Avec idx_film_id (PK film) :** Hash Join, coût **581.40** — quasiment identique. L'index sur id ne sert pas ici car la restriction porte sur `pays`, pas sur `id`.
 
 **Avec idx_film_id + idx_film_pays :** Hash Join, coût **458.62**. L'index sur `pays` est utilisé : Bitmap Heap Scan sur film (35 lignes récupérées directement). Titres est toujours en Seq Scan car aucun index n'y est posé.
+
+![Q10 avec 3 index - Nested Loop](screenshots/q10_nested_loop.png)
 
 **Avec idx_film_id + idx_film_pays + idx_titres_id_film :** **Nested Loop**, coût **304.53**. Changement majeur : PostgreSQL bascule vers une boucle imbriquée. Film est filtré via `idx_film_pays` (35 lignes), puis pour chacune, `idx_titres_id_film` (FK) localise directement les titres correspondants. C'est le plan optimal.
 
@@ -217,7 +224,11 @@ CREATE INDEX idx_film_annee ON film(annee) WHERE annee >= 2000;
 
 **`WHERE annee = 2003` :** Index Scan, coût **29.51**. 2003 >= 2000 → l'index partiel couvre cette valeur, il est utilisé.
 
+![Q11 annee=2003](screenshots/q11_annee_2003.png)
+
 **`WHERE annee = 1995` :** Seq Scan, coût **183.32**. 1995 < 2000 → hors de la plage de l'index partiel, PostgreSQL l'ignore et parcourt toute la table. Pourtant il y a moins de films en 1995 (639) qu'en 2003 (756) — l'index n'est pas disponible pour les années < 2000.
+
+![Q11 annee=1995](screenshots/q11_annee_1995.png)
 
 **Conclusion :** Un index partiel couvre uniquement le sous-ensemble de données défini par sa condition. Il est plus compact et plus rapide qu'un index complet, mais uniquement pour les requêtes portant sur la plage couverte. Ici, il est pertinent si les films récents (>= 2000) sont beaucoup plus souvent requêtés que les anciens.
 
@@ -262,8 +273,12 @@ Coût : **183.33** — Exécution : ~0.68 ms. Un seul Seq Scan + agrégat. Postg
 **NOT IN** — coût **286.76**, ~2.9 ms
 Seq Scan sur realisateur avec sous-plan haché (hashed SubPlan) : PostgreSQL charge tous les id_real de Realise en table de hachage, puis filtre realisateur. Moins coûteux que la Q13 mais reste sous-optimal.
 
+![Q14 NOT IN](screenshots/q14_not_in.png)
+
 **NOT EXISTS** — coût **461.78**, ~1.75 ms
 PostgreSQL transforme le NOT EXISTS en **Hash Right Anti Join** : il charge realisateur en table de hachage, parcourt realise et retourne les réalisateurs sans correspondance. Plan identique au LEFT JOIN.
+
+![Q14 NOT EXISTS](screenshots/q14_not_exist.png)
 
 **LEFT JOIN ... IS NULL** — coût **461.78**, ~1.71 ms
 Plan strictement identique au NOT EXISTS : PostgreSQL génère le même **Hash Right Anti Join**. L'optimiseur reconnaît que les deux écritures sont équivalentes.
@@ -279,6 +294,135 @@ Oui, 2 index sont utiles :
 - `CREATE UNIQUE INDEX idx_realisateur_id ON realisateur(id);` — PK de Realisateur
 
 Ces index permettraient de passer d'un Hash Join à un Nested Loop si peu de réalisateurs sont concernés.
+
+---
+
+### Question 15 — 4 écritures équivalentes (sans index)
+
+| Requête | Plan | Coût |
+|---|---|---|
+| `BETWEEN 2000 AND 2001` | Seq Scan | 207.59 |
+| `id=2000 OR id=2001` | Seq Scan | 207.59 |
+| `id IN (2000, 2001)` | Seq Scan | **183.32** |
+| `UNION` | 2x Seq Scan + Sort + Unique | 366.69 |
+
+**IN est le plus performant** (coût 183.32 vs 207.59). PostgreSQL optimise `IN` avec un filtre `ANY` sur tableau, légèrement plus efficace que BETWEEN ou OR.
+
+**UNION est de loin le plus coûteux** (366.69) : il exécute 2 Seq Scans séparés sur toute la table, puis trie et dédoublonne les résultats — un surcoût inutile ici.
+
+**Conclusion :** Préférer `IN` à `OR` ou `BETWEEN` pour des listes de valeurs discrètes. Éviter `UNION` quand `OR` ou `IN` suffisent. Sous Oracle, BETWEEN/OR/IN ont le même coût — comportement différent selon le SGBD.
+
+---
+
+### Question 16 — Division relationnelle : réalisateurs ayant réalisé tous les films
+
+**NOT EXISTS imbriqué** — coût **5 792 436 113** (~5 milliards), ~108 ms
+Plan catastrophique en théorie (coût estimé énorme dû aux boucles imbriquées x9706 x5976). En pratique ~108 ms car PostgreSQL optimise avec un SubPlan haché et bénéficie de l'**arrêt anticipé (Early Exit)** : dès qu'un film manque pour un réalisateur, la recherche s'arrête pour ce tuple.
+
+**COUNT avec GROUP BY HAVING** — coût **1 504.72**, ~5.6 ms
+Plan bien plus efficace : Hash Join entre realisateur et realise, tri, GroupAggregate + filtre sur COUNT. Bien plus rapide en pratique (~20x).
+
+**Classement : COUNT >> NOT EXISTS** (1 504 vs 5 792 436 113 en coût estimé, 5.6 ms vs 108 ms).
+
+**Nuance :** Sur de très gros volumes ou avec des requêtes plus complexes, NOT EXISTS peut redevenir compétitif grâce à l'Early Exit. De plus, NOT EXISTS fonctionne toujours (même avec doublons ou NULL), contrairement au COUNT qui peut être incorrect dans certains cas.
+
+---
+
+## TABLES PARTITIONNÉES
+
+### 1-2. Création de la table et des partitions
+
+```sql
+CREATE TABLE ville (...) PARTITION BY LIST (upper(pays));
+-- Partitions niveau 1
+CREATE TABLE villeFR PARTITION OF ville FOR VALUES IN ('FRANCE');
+CREATE TABLE villeDE PARTITION OF ville FOR VALUES IN ('ALLEMAGNE');
+CREATE TABLE villeUS PARTITION OF ville FOR VALUES IN ('USA');
+-- Partition niveau 2 (ITALY sous-partitionnée par RANGE)
+CREATE TABLE villeIT PARTITION OF ville FOR VALUES IN ('ITALY') PARTITION BY RANGE (nbhabitants);
+CREATE TABLE villeIT_1_to_1M  PARTITION OF villeIT FOR VALUES FROM (1) TO (1000000);
+CREATE TABLE villeIT_1M1_to_10M PARTITION OF villeIT FOR VALUES FROM (1000001) TO (10000000);
+```
+
+### 3. Plans d'exécution
+
+**`WHERE nom = 'Lyon'`** — Append sur **5 partitions**, coût 68.15
+
+![TP ville nom='Lyon'](screenshots/tp_ville_nom.png)
+
+```
+Append
+  -> Seq Scan on villede   (0 ligne)
+  -> Seq Scan on villefr   (1 ligne  ← Lyon trouvé ici)
+  -> Seq Scan on villeit_1_to_1m
+  -> Seq Scan on villeit_1m1_to_10m
+  -> Seq Scan on villeus
+```
+La clé de partition est `pays`, pas `nom` → PostgreSQL ne peut pas éliminer de partitions. Il parcourt les **5 partitions** même si Lyon n'est que dans villeFR.
+
+**`WHERE nbhabitants=120000`** — Append sur **4 partitions**, coût 54.52
+
+![TP ville nbhabitants=120000](screenshots/tp_ville_nbhabitants.png)
+
+```
+Append
+  -> Seq Scan on villede
+  -> Seq Scan on villefr
+  -> Seq Scan on villeit_1_to_1m   (120000 est dans la plage 1→1M)
+  -> Seq Scan on villeus
+```
+PostgreSQL **élimine villeIT_1M1_to_10M** grâce au partitionnement RANGE : 120 000 ne peut pas être dans la plage 1 000 001→10 000 000. C'est le **partition pruning** en action.
+
+**Remarque :** Avec seulement 6 lignes, le partitionnement est plus coûteux que sans partition (multiple Seq Scans). Sur une très grande table, le rapport s'inverse : le pruning évite de scanner des millions de lignes inutilement.
+
+### 4. Suppression
+```sql
+DROP TABLE ville CASCADE;
+```
+
+---
+
+## SYNTHÈSE GLOBALE
+
+### Synthèse — Indexation
+
+**Sur quels champs créer des index ?**
+- Les **clés primaires (PK)** : index unique, garantit l'unicité et optimise les jointures et recherches par identifiant.
+- Les **clés étrangères (FK)** : index non unique, indispensable pour les jointures (Q7, Q10). Sans index sur la FK, PostgreSQL utilise un Hash Join au lieu d'un Nested Loop bien plus efficace.
+- Les **champs du WHERE fréquemment utilisés** : améliore les sélections (Q2, Q8, Q10).
+- Les **expressions/fonctions** : si une fonction est appliquée dans le WHERE, créer un index sur cette expression (Q8).
+
+**Conditions pour qu'un index soit utilisé :**
+- La requête doit retourner **moins de ~20-30% des lignes** (Q4 vs Q5). Au-delà, le Seq Scan est préféré.
+- Pour une clause **AND**, un seul index sur le champ le plus sélectif suffit (Q2).
+- Pour une clause **OR**, il faut **un index sur chaque condition** sinon PostgreSQL revient au Seq Scan (Q3).
+- Pas d'index sur une **fonction** appliquée à la colonne sans index d'expression (Q8).
+
+**Index mono-colonne vs multicolonne :**
+- Un index multicolonne n'est utile que si la **1ère colonne est présente dans le WHERE** (règle du préfixe, Q6). PostgreSQL 18 atténue cela avec le Skip Scan.
+- Pour une table de jointure, combiner un index unique multicolonne (PK composite) + un index mono-colonne sur la 2ème FK (Q7).
+- 2 index mono-colonne sont plus flexibles mais plus volumineux qu'un index multicolonne.
+
+**Règle générale :** ~40% du volume de la base doit être indexé. Un excès d'index pénalise les écritures (INSERT/UPDATE), un manque pénalise les lectures (SELECT).
+
+---
+
+### Synthèse — Optimisation de requêtes
+
+**Forme des requêtes :**
+- Préférer `IN` à `OR` ou `BETWEEN` pour des valeurs discrètes (Q15).
+- Éviter `UNION` quand `OR` ou `IN` suffisent — `UNION` génère 2 Seq Scans + tri (Q15).
+- Préférer `MAX()`/`MIN()` à `ALL` ou `NOT EXISTS` pour trouver une valeur extrême — gain de plusieurs ordres de grandeur (Q13).
+- Pour une division relationnelle, préférer `COUNT + GROUP BY HAVING` à `NOT EXISTS` imbriqué sur petits volumes (Q16), mais NOT EXISTS reste plus sûr avec des NULL ou doublons.
+- `NOT EXISTS` et `LEFT JOIN ... IS NULL` génèrent le même plan sous PostgreSQL (Q14).
+
+**Impact du changement de SGBD ou de version :**
+- Les plans d'exécution peuvent changer radicalement d'une version à l'autre ou d'un SGBD à l'autre (Q14, Q15). Une requête optimale sous Oracle 10g peut être sous-optimale sous Oracle 11g et vice-versa.
+- Ne jamais supposer que le comportement sera identique lors d'une migration — toujours re-tester les plans critiques.
+
+**Jointures :**
+- Sans restriction (toutes les lignes retournées) → Hash Join inévitable, les index n'aident pas (Q9).
+- Avec restriction → indexer le champ du WHERE + les FK pour permettre un Nested Loop (Q10).
 
 ---
 
@@ -325,3 +469,11 @@ Ces index permettraient de passer d'un Hash Join à un Nested Loop si peu de ré
 | 14 | NOT IN | Seq Scan + hashed SubPlan | 286.76 |
 | 14 | NOT EXISTS | Hash Right Anti Join | 461.78 |
 | 14 | LEFT JOIN IS NULL | Hash Right Anti Join (identique) | 461.78 |
+| 15 | BETWEEN | Seq Scan | 207.59 |
+| 15 | OR | Seq Scan | 207.59 |
+| 15 | IN | Seq Scan (ANY) | 183.32 |
+| 15 | UNION | 2x Seq Scan + Sort + Unique | 366.69 |
+| 16 | NOT EXISTS imbriqué | Nested Loop Anti Join | ~5 792 436 113 |
+| 16 | COUNT GROUP BY HAVING | GroupAggregate + Hash Join | 1 504.72 |
+| TP | WHERE nom='Lyon' (5 partitions) | Append + 5x Seq Scan | 68.15 |
+| TP | WHERE nbhabitants=120000 (pruning) | Append + 4x Seq Scan | 54.52 |
