@@ -190,6 +190,39 @@ Règle générale : **toujours indexer les clés étrangères** (FK) car elles s
 
 ---
 
+### Question 10 — JOIN Film / Titres avec `WHERE f.pays='FR/BE'`
+
+**Sans index :** Hash Join, coût **604.89**. Titres est parcourue entièrement (Seq Scan, 20 247 lignes), film aussi (Seq Scan avec filtre pays, 35 résultats). La restriction réduit le volume mais sans index PostgreSQL doit tout lire.
+
+**Avec idx_film_id (PK film) :** Hash Join, coût **581.40** — quasiment identique. L'index sur id ne sert pas ici car la restriction porte sur `pays`, pas sur `id`.
+
+**Avec idx_film_id + idx_film_pays :** Hash Join, coût **458.62**. L'index sur `pays` est utilisé : Bitmap Heap Scan sur film (35 lignes récupérées directement). Titres est toujours en Seq Scan car aucun index n'y est posé.
+
+**Avec idx_film_id + idx_film_pays + idx_titres_id_film :** **Nested Loop**, coût **304.53**. Changement majeur : PostgreSQL bascule vers une boucle imbriquée. Film est filtré via `idx_film_pays` (35 lignes), puis pour chacune, `idx_titres_id_film` (FK) localise directement les titres correspondants. C'est le plan optimal.
+
+**Index utilisés et principe :**
+- `idx_film_pays` → index sur la **condition de recherche** (WHERE)
+- `idx_film_id` → index sur la **PK** (clé de jointure côté film)
+- `idx_titres_id_film` → index sur la **FK** (clé de jointure côté titres)
+
+**Principe :** Pour optimiser une jointure avec restriction, il faut indexer : (1) les champs du WHERE, (2) les PK, (3) les FK. C'est la même conclusion qu'en Q7.
+
+---
+
+### Question 11 — Index partiel
+
+```sql
+CREATE INDEX idx_film_annee ON film(annee) WHERE annee >= 2000;
+```
+
+**`WHERE annee = 2003` :** Index Scan, coût **29.51**. 2003 >= 2000 → l'index partiel couvre cette valeur, il est utilisé.
+
+**`WHERE annee = 1995` :** Seq Scan, coût **183.32**. 1995 < 2000 → hors de la plage de l'index partiel, PostgreSQL l'ignore et parcourt toute la table. Pourtant il y a moins de films en 1995 (639) qu'en 2003 (756) — l'index n'est pas disponible pour les années < 2000.
+
+**Conclusion :** Un index partiel couvre uniquement le sous-ensemble de données défini par sa condition. Il est plus compact et plus rapide qu'un index complet, mais uniquement pour les requêtes portant sur la plage couverte. Ici, il est pertinent si les films récents (>= 2000) sont beaucoup plus souvent requêtés que les anciens.
+
+---
+
 ## RÉSULTATS ATTENDUS — GUIDE DE REVIEW
 
 | Q | Étape | Type de scan attendu | Coût attendu |
@@ -220,3 +253,9 @@ Règle générale : **toujours indexer les clés étrangères** (FK) car elles s
 | 9 | Sans index | Hash Join | 903.25 |
 | 9 | Avec idx_film_id | Hash Join (identique) | 678.03 |
 | 9 | Avec idx_film_id + idx_titres_id_film | Hash Join (identique) | 678.03 |
+| 10 | Sans index | Hash Join | 604.89 |
+| 10 | + idx_film_id | Hash Join (quasi identique) | 581.40 |
+| 10 | + idx_film_pays | Hash Join (Bitmap sur film) | 458.62 |
+| 10 | + idx_titres_id_film | Nested Loop | 304.53 |
+| 11 | annee=2003 (index partiel >= 2000) | Index Scan | 29.51 |
+| 11 | annee=1995 (hors plage index) | Seq Scan | 183.32 |
