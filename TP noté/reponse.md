@@ -136,3 +136,87 @@ Un index multicolonne est plus compact que 2 index mono-colonne séparés car il
 L'index multicolonne est pertinent uniquement si la **1ère colonne est systématiquement présente dans les requêtes** (règle du préfixe). Sous PostgreSQL 18, le Skip Scan atténue cette contrainte. Les 2 index mono-colonne sont plus flexibles (chaque condition peut utiliser son index indépendamment) mais occupent plus d'espace et pénalisent davantage les écritures.
 
 ---
+### Question 7 — Index multicolonnes sur table de jointure (Realise)
+
+#### Avec index unique multicolonne sur (id_film, id_real)
+
+`WHERE id_film=1` → **Index Only Scan** via `idx_realise` (coût 4.30). La 1ère colonne correspond : index utilisé et même pas besoin d'accéder à la table (toutes les colonnes sont dans l'index).
+
+`WHERE id_real=2` → **Seq Scan** (coût 174.06). La 2ème colonne seule ne suffit pas : index ignoré, 10 243 lignes parcourues inutilement.
+
+#### Avec index unique multicolonne + 2 index mono-colonne (id_film et id_real)
+
+`WHERE id_film=1` → **Index Only Scan** via `idx_realise` (coût 4.30). Identique.
+
+`WHERE id_real=2` → **Index Scan** via `idx_realise_idreal` (coût 10.87). Cette fois l'index mono-colonne sur `id_real` est utilisé.
+
+#### Préconisation
+Pour une table de jointure (association), il faut **combiner les deux approches** :
+- Un **index unique multicolonne** sur (id_film, id_real) pour garantir l'unicité (équivalent PK) et couvrir les recherches sur la 1ère colonne.
+- Un **index mono-colonne sur la 2ème FK** (id_real) pour couvrir les recherches sur cette colonne seule.
+
+Règle générale : **toujours indexer les clés étrangères** (FK) car elles sont très fréquemment utilisées dans les jointures et les recherches.
+
+---
+
+---
+| 6 | 2 mono — OR | Bitmap Heap Scan + BitmapOr | ~75 |
+| 7 | idx multicolonne — WHERE id_film | Index Only Scan | 4.30 |
+| 7 | idx multicolonne — WHERE id_real | Seq Scan (index ignoré) | 174.06 |
+| 7 | + idx mono id_real — WHERE id_real | Index Scan | 10.87 |
+
+
+### Question 8 — `SELECT * FROM film WHERE SUBSTR(pays,1,2) = 'CH';`
+
+**Avec `idx_film_pays` (index sur pays) :** Seq Scan, coût **207.59**. L'index sur `pays` est ignoré car la requête n'utilise pas `pays` directement mais une **fonction** appliquée dessus (`SUBSTR`). PostgreSQL ne peut pas utiliser un index B-tree sur `pays` pour rechercher sur `SUBSTR(pays,1,2)`.
+
+**Avec `idx_film_substr_pays` (index sur expression) :** Bitmap Heap Scan, coût **67.10**. En indexant directement l'expression `substr(pays,1,2)`, PostgreSQL peut utiliser l'index car la valeur calculée est stockée dans l'index. L'index sur fonction résout exactement ce problème.
+
+**Conclusion :** Un index classique sur une colonne est inefficace si une fonction est appliquée dans le WHERE. Il faut créer un **index sur expression** qui pré-calcule et stocke le résultat de la fonction.
+
+---
+
+---
+
+### Question 9 — JOIN Film / Titres sans restriction
+
+**Sans index :** Hash Join, coût **903.25**. PostgreSQL charge film en table de hachage (Hash) puis parcourt titres séquentiellement pour matcher. Les 2 tables sont entièrement lues via Seq Scan car toutes les lignes sont retournées (20 247 résultats).
+
+**Avec idx_film_id (PK film) :** Hash Join, coût **678.03**. Le plan ne change pas (toujours Hash Join + Seq Scans) car **toutes les lignes sont retournées**. L'index sur la PK n'est d'aucune utilité ici : PostgreSQL doit de toute façon lire film entièrement pour construire la table de hachage.
+
+**Avec idx_film_id + idx_titres_id_film :** Hash Join, coût **678.03** — identique. Même raisonnement : la jointure retourne 20 247 lignes, soit la totalité de titres. Les index ne servent à rien quand il n'y a pas de restriction réduisant le volume.
+
+**Conclusion :** Sans clause WHERE restrictive, une jointure complète utilise toujours le **Hash Join** et les **Seq Scans**, quel que soit l'indexation. Les index ne sont utiles que si une restriction filtre suffisamment les données.
+
+---
+
+## RÉSULTATS ATTENDUS — GUIDE DE REVIEW
+
+| Q | Étape | Type de scan attendu | Coût attendu |
+|---|---|---|---|
+| 1 | Sans index | Seq Scan | 183.32 |
+| 1 | Avec idx_film_id | Index Scan | 8.30 |
+| 2 | Sans index | Seq Scan | 207.59 |
+| 2 | Avec idx_film_id | Index Scan | 8.30 |
+| 2 | Avec idx_film_id + idx_film_pays | Index Scan (idx_film_id, pays ignoré) | 8.30 |
+| 3 | Sans index | Seq Scan | 207.59 |
+| 3 | Avec idx_film_id seul | Seq Scan (index ignoré) | 207.59 |
+| 3 | Avec idx_film_id + idx_film_pays | Bitmap Heap Scan + BitmapOr | 32.13 |
+| 4 | Sans index | Seq Scan | 183.32 |
+| 4 | Avec idx_film_id | Seq Scan (index ignoré, 79% lignes) | 183.32 |
+| 5 | Avec idx_film_id | Index Scan | 68.14 |
+| 6 | (pays,annee) — WHERE pays | Bitmap Heap Scan | ~25 |
+| 6 | (pays,annee) — WHERE annee | Seq Scan (index ignoré) | 183.32 |
+| 6 | (pays,annee) — OR | Seq Scan | 207.59 |
+| 6 | (annee,pays) — WHERE pays | Index Scan (Skip Scan PG18) | ~40 |
+| 6 | (annee,pays) — WHERE annee | Bitmap Heap Scan | ~70 |
+| 6 | (annee,pays) — OR | Bitmap Heap Scan + BitmapOr | ~96 |
+| 6 | 2 mono — OR | Bitmap Heap Scan + BitmapOr | ~75 |
+| 7 | idx multicolonne — WHERE id_film | Index Only Scan | 4.30 |
+| 7 | idx multicolonne — WHERE id_real | Seq Scan (index ignoré) | 174.06 |
+| 7 | + idx mono id_real — WHERE id_real | Index Scan | 10.87 |
+| 8 | Index sur pays | Seq Scan (fonction ignorée) | 207.59 |
+| 8 | Index sur substr(pays,1,2) | Bitmap Heap Scan | 67.10 |
+| 9 | Sans index | Hash Join | 903.25 |
+| 9 | Avec idx_film_id | Hash Join (identique) | 678.03 |
+| 9 | Avec idx_film_id + idx_titres_id_film | Hash Join (identique) | 678.03 |
